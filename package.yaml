@@ -28,7 +28,7 @@ library:
   source-dirs: src
 
 executables:
-  mt19937-exe:
+  mt19937:
     main:                Main.hs
     source-dirs:         app
     ghc-options:
