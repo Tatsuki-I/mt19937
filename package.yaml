@@ -23,6 +23,9 @@ dependencies:
 - base >= 4.7 && < 5
 - repa
 - array
+- random
+- cborg
+- bit-stream
 
 library:
   source-dirs: src

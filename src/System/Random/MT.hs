@@ -1,16 +1,103 @@
 module System.Random.MT where
 
-import Data.Bits        ((.&.), (.|.), xor, shiftR, shiftL)
-import Data.Word        (Word32)
-import Data.Int         (Int32)
-import Control.Monad.ST (runST)
-import Data.STRef       (newSTRef, modifySTRef, readSTRef, writeSTRef)
-import qualified Data.Array.Repa as R
-import Data.Array.ST (newArray, readArray, writeArray, runSTArray)
-import qualified Data.Array.IArray      as A
+import qualified Data.Array.IArray as A
 import qualified Data.Array.MArray as M
+import qualified Data.Array.Repa   as R
+import           Data.Bits         ( (.&.)
+                                   , (.|.)
+                                   , xor
+                                   , shiftR
+                                   , shiftL)
+import           Data.Word         ( Word32
+                                   , Word64 )
+import           Data.Int          ( Int32 )
+import           Control.Monad.ST  ( runST)
+import           Data.STRef        ( newSTRef
+                                   , modifySTRef
+                                   , readSTRef
+                                   , writeSTRef )
+
+import           Data.Array.ST     ( newArray
+                                   , readArray
+                                   , writeArray, runSTArray)
+
+import           System.CPUTime    ( getCPUTime )
+import           Codec.CBOR.Magic  ( word32ToWord )
+import           Data.Ratio        ( (%) )
+import           Data.BitStream.ContinuousMapping (wordToInt)
+
+
+class (Num a, Ord a, Integral a) => RandomMT a where
+
+  --randomR :: RandomGen g => (a,a) -> g -> (a,g)
+  randoms   :: StdGenMT -> [a]
+
+  randomRs            :: (a, a) -> StdGenMT -> [a]
+  randomRs (lo, hi) g |  lo > hi   = randomRs (hi, lo) g
+                      |  otherwise = map ((+ lo) . (`mod` range)) (randoms g)
+                         where range = hi - lo + 1
+
+  random    :: StdGenMT -> (a, StdGenMT)
+  random g  =  (randoms g !! getNum g, nextGen g)
+
+  randomR   :: (a, a) -> StdGenMT -> (a, StdGenMT)
+  randomR r g =  (randomRs r g !! getNum g, nextGen g)
+
+  randomIOs  :: IO [a]
+  randomIOs  =  (randoms . mkStdGenMT) <$> getCPUTime
+
+  randomIO :: IO a
+  randomIO =  head <$> randomIOs
+
+instance RandomMT Word where
+  randoms = genrandInt . getSeed
+
+instance RandomMT Int where
+  randoms　g = map wordToInt (randoms g :: [Word])
+
+data StdGenMT = StdGenMT Int Seed
+
+nextGen                :: StdGenMT -> StdGenMT
+nextGen (StdGenMT i s) =  StdGenMT (i + 1) s
 
 type Seed = Word32
+
+class RandomGenMT g where
+  mkStdGenMT :: g -> StdGenMT
+
+instance RandomGenMT Word32 where
+  mkStdGenMT = StdGenMT 0
+
+instance RandomGenMT Integer where
+  mkStdGenMT i = StdGenMT 0 (fromInteger i)
+
+instance RandomGenMT Int where
+  mkStdGenMT i = StdGenMT 0 (fromIntegral i)
+
+
+getSeed                :: StdGenMT -> Seed
+getSeed (StdGenMT _ s) =  s
+
+getNum                :: StdGenMT -> Int
+getNum (StdGenMT i _) =  i
+
+
+--genrandReal132 :: Fractional a => StdGenMT -> [a]
+--genrandReal132 g =  map (toRational) $ genrandInt32 g
+genrandReal132 g =  map (fromRational
+                        . (% (if is64bit
+                                 then 18446744073709551615
+                                 else 4294967295))
+                        . toInteger) (randoms g :: [Word])
+{-
+(maxBound :: Word32) == 4294967295
+(maxBound :: Word64) == 18446744073709551615
+-}
+
+is64bit = word32ToWord (maxBound :: Word32) /= (maxBound :: Word)
+
+genrandInt | is64bit   = genrandInt32
+           | otherwise = genrandInt32 -- TODO replace to 64
 
 {- Period parameters -}
 n         = 624
@@ -19,33 +106,23 @@ matrixA   = 0x9908b0df :: Word32 -- constant vector a
 upperMask = 0x80000000 :: Word32 -- most significant w-r bits
 lowerMask = 0x7fffffff :: Word32 -- least significant r bits
 
-initGenrand   :: Seed -> [Word32]
-initGenrand s =  first : f first [1 .. (n - 1)]
-                 where f                    :: Word32 -> [Word32] -> [Word32]
-                       f _    []            =  []
-                       f prev (curr : next) =  new : f new next
-                                               where new =  ((1812433253 :: Word32) * (prev `xor` (prev `shiftR` 30)) + curr) .&. (0xffffffff :: Word32)
-                       first :: Word32
-                       first =  s .&. (0xffffffff :: Word32)
+initGenrand32   :: Seed -> [Word32]
+initGenrand32 s =  first : f first [1 .. (n - 1)]
+                   where f                    :: Word32 -> [Word32] -> [Word32]
+                         f _    []            =  []
+                         f prev (curr : next) =  new : f new next
+                                                 where new =  ((1812433253 :: Word32) * (prev `xor` (prev `shiftR` 30)) + curr) .&. (0xffffffff :: Word32)
+                         first :: Word32
+                         first =  s .&. (0xffffffff :: Word32)
 
-initGenrandRepa   :: Seed -> R.Array R.U R.DIM1 Word32
-initGenrandRepa s =  R.fromListUnboxed (R.Z R.:. fromIntegral n) $ initGenrand s
+initGenrandRepa32   :: Seed -> R.Array R.U R.DIM1 Word32
+initGenrandRepa32 s =  R.fromListUnboxed (R.Z R.:. fromIntegral n) $ initGenrand32 s
 
-initGenrandArray   :: Seed -> A.Array Word32 Word32
-initGenrandArray s =  A.listArray (0, n - 1) (initGenrand s)
+initGenrandArray32   :: Seed -> A.Array Word32 Word32
+initGenrandArray32 s =  A.listArray (0, n - 1) (initGenrand32 s)
 
-{-
-initByArray                   :: [Word32] -> Int32 -> [Word32]
-initByArray initKey keyLength =  undefined
-                                 where i = 1
-                                       j = 0
-                                       k = if fromIntegral n > keyLength
-                                              then n
-                                              else fromIntegral keyLength
--}
-
-genrandInt32      :: Seed -> [Word32]
-genrandInt32 seed =  map tempering $ g 0 $ initGenrandArray seed
+genrandInt32      :: Seed -> [Word]
+genrandInt32 seed =  map (word32ToWord . tempering) $ g 0 $ initGenrandArray32 seed
 
 {- default seed is 5489-}
 
@@ -86,7 +163,3 @@ tempering x =  runST $ do res  <- newSTRef (x :: Word32)
                           res' <- readSTRef res
                           modifySTRef res (xor  (res' `shiftR` 18))
                           readSTRef res
-
-test =  arr A.// [(0, 'B')]
-        where arr :: A.Array Word32 Char
-              arr =  A.listArray (0, 10) ['a' ..]
