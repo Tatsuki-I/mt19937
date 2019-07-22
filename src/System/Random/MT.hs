@@ -1,4 +1,13 @@
-module System.Random.MT where
+module System.Random.MT ( randoms
+                        , random
+                        , randomRs
+                        , randomR
+                        , randomIOs
+                        , randomIO
+                        , mkStdGenMT
+                        , getSeed
+                        , getNum
+                        ) where
 
 import qualified Data.Array.IArray as A
 import qualified Data.Array.MArray as M
@@ -27,21 +36,11 @@ import           Data.Ratio        ( (%) )
 import           Data.BitStream.ContinuousMapping (wordToInt)
 
 
-class (Num a, Ord a, Integral a) => RandomMT a where
-
-  --randomR :: RandomGen g => (a,a) -> g -> (a,g)
+class RandomMT a where
   randoms   :: StdGenMT -> [a]
-
-  randomRs            :: (a, a) -> StdGenMT -> [a]
-  randomRs (lo, hi) g |  lo > hi   = randomRs (hi, lo) g
-                      |  otherwise = map ((+ lo) . (`mod` range)) (randoms g)
-                         where range = hi - lo + 1
 
   random    :: StdGenMT -> (a, StdGenMT)
   random g  =  (randoms g !! getNum g, nextGen g)
-
-  randomR   :: (a, a) -> StdGenMT -> (a, StdGenMT)
-  randomR r g =  (randomRs r g !! getNum g, nextGen g)
 
   randomIOs  :: IO [a]
   randomIOs  =  (randoms . mkStdGenMT) <$> getCPUTime
@@ -49,11 +48,27 @@ class (Num a, Ord a, Integral a) => RandomMT a where
   randomIO :: IO a
   randomIO =  head <$> randomIOs
 
-instance RandomMT Word where
+instance RandomMT Word   where
   randoms = genrandInt . getSeed
-
-instance RandomMT Int where
+instance RandomMT Int    where
   randoms　g = map wordToInt (randoms g :: [Word])
+instance RandomMT Double where
+  randoms = genrandReal132
+instance RandomMT Float  where
+  randoms = genrandReal132
+
+
+class (Num a, Ord a, Integral a, RandomMT a) => RandomMTR a where
+  randomRs            :: (a, a) -> StdGenMT -> [a]
+  randomRs (lo, hi) g |  lo > hi   = randomRs (hi, lo) g
+                      |  otherwise = map ((+ lo) . (`mod` range)) (randoms g)
+                         where range = hi - lo + 1
+
+  randomR     :: (a, a) -> StdGenMT -> (a, StdGenMT)
+  randomR r g =  (randomRs r g !! getNum g, nextGen g)
+
+instance RandomMTR Int  where
+instance RandomMTR Word where
 
 data StdGenMT = StdGenMT Int Seed
 
@@ -65,13 +80,11 @@ type Seed = Word32
 class RandomGenMT g where
   mkStdGenMT :: g -> StdGenMT
 
-instance RandomGenMT Word32 where
+instance RandomGenMT Word32  where
   mkStdGenMT = StdGenMT 0
-
 instance RandomGenMT Integer where
   mkStdGenMT i = StdGenMT 0 (fromInteger i)
-
-instance RandomGenMT Int where
+instance RandomGenMT Int     where
   mkStdGenMT i = StdGenMT 0 (fromIntegral i)
 
 
@@ -81,9 +94,7 @@ getSeed (StdGenMT _ s) =  s
 getNum                :: StdGenMT -> Int
 getNum (StdGenMT i _) =  i
 
-
---genrandReal132 :: Fractional a => StdGenMT -> [a]
---genrandReal132 g =  map (toRational) $ genrandInt32 g
+genrandReal132   :: Fractional b => System.Random.MT.StdGenMT -> [b]
 genrandReal132 g =  map (fromRational
                         . (% (if is64bit
                                  then 18446744073709551615
