@@ -12,35 +12,35 @@ module System.Random.MT ( randoms
 import qualified Data.Array.IArray as A
 import qualified Data.Array.MArray as M
 import qualified Data.Array.Repa   as R
-import           Data.Bits         ( (.&.)
-                                   , (.|.)
-                                   , xor
-                                   , shiftR
-                                   , shiftL)
-import           Data.Word         ( Word32
-                                   , Word64 )
-import           Data.Int          ( Int32 )
-import           Control.Monad.ST  ( runST)
-import           Data.STRef        ( newSTRef
-                                   , modifySTRef
-                                   , readSTRef
-                                   , writeSTRef )
+import           Data.Bits                        ( (.&.)
+                                                  , (.|.)
+                                                  , xor
+                                                  , shiftR
+                                                  , shiftL)
+import           Data.Word                        ( Word32
+                                                  , Word64 )
+import           Data.Int                         ( Int32 )
+import           Control.Monad.ST                 ( runST)
+import           Data.STRef                       ( newSTRef
+                                                  , modifySTRef
+                                                  , readSTRef
+                                                  , writeSTRef )
 
-import           Data.Array.ST     ( newArray
-                                   , readArray
-                                   , writeArray, runSTArray)
+import           Data.Array.ST                    ( newArray
+                                                  , readArray
+                                                  , writeArray, runSTArray)
 
-import           System.CPUTime    ( getCPUTime )
-import           Codec.CBOR.Magic  ( word32ToWord )
-import           Data.Ratio        ( (%) )
-import           Data.BitStream.ContinuousMapping (wordToInt)
+import           System.CPUTime                   ( getCPUTime )
+import           Codec.CBOR.Magic                 ( word32ToWord )
+import           Data.Ratio                       ( (%) )
+import           Data.BitStream.ContinuousMapping ( wordToInt )
 
 
 class RandomMT a where
   randoms   :: StdGenMT -> [a]
 
-  random    :: StdGenMT -> (a, StdGenMT)
-  random g  =  (randoms g !! getNum g, nextGen g)
+  random     :: StdGenMT -> (a, StdGenMT)
+  random gen =  (randoms gen !! getNum gen, nextGen gen)
 
   randomIOs  :: IO [a]
   randomIOs  =  (randoms . mkStdGenMT) <$> getCPUTime
@@ -51,21 +51,22 @@ class RandomMT a where
 instance RandomMT Word   where
   randoms = genrandInt . getSeed
 instance RandomMT Int    where
-  randoms　g = map wordToInt (randoms g :: [Word])
+  randoms gen = map wordToInt (randoms gen :: [Word])
 instance RandomMT Double where
   randoms = genrandReal132
 instance RandomMT Float  where
   randoms = genrandReal132
-
+instance RandomMT Word32 where
+  randoms gen = map tempering $ g 0 $ initGenrandArray32 $ getSeed gen
 
 class (Num a, Ord a, Integral a, RandomMT a) => RandomMTR a where
-  randomRs            :: (a, a) -> StdGenMT -> [a]
-  randomRs (lo, hi) g |  lo > hi   = randomRs (hi, lo) g
-                      |  otherwise = map ((+ lo) . (`mod` range)) (randoms g)
-                         where range = hi - lo + 1
+  randomRs              :: (a, a) -> StdGenMT -> [a]
+  randomRs (lo, hi) gen |  lo > hi   = randomRs (hi, lo) gen
+                        |  otherwise = map ((+ lo) . (`mod` range)) (randoms gen)
+                        where range = hi - lo + 1
 
-  randomR     :: (a, a) -> StdGenMT -> (a, StdGenMT)
-  randomR r g =  (randomRs r g !! getNum g, nextGen g)
+  randomR       :: (a, a) -> StdGenMT -> (a, StdGenMT)
+  randomR r gen =  (randomRs r gen !! getNum gen, nextGen gen)
 
 instance RandomMTR Int  where
 instance RandomMTR Word where
@@ -94,19 +95,21 @@ getSeed (StdGenMT _ s) =  s
 getNum                :: StdGenMT -> Int
 getNum (StdGenMT i _) =  i
 
-genrandReal132   :: Fractional b => System.Random.MT.StdGenMT -> [b]
-genrandReal132 g =  map (fromRational
-                        . (% (if is64bit
-                                 then 18446744073709551615
-                                 else 4294967295))
-                        . toInteger) (randoms g :: [Word])
+genrandReal132     :: Fractional b => System.Random.MT.StdGenMT -> [b]
+genrandReal132 gen =  map (fromRational
+                          . (% (if is64bit
+                                   then 18446744073709551615
+                                   else 4294967295))
+                          . toInteger) (randoms gen :: [Word])
 {-
 (maxBound :: Word32) == 4294967295
 (maxBound :: Word64) == 18446744073709551615
 -}
 
-is64bit = word32ToWord (maxBound :: Word32) /= (maxBound :: Word)
+is64bit :: Bool
+is64bit =  word32ToWord (maxBound :: Word32) /= (maxBound :: Word)
 
+genrandInt :: Seed -> [Word]
 genrandInt | is64bit   = genrandInt32
            | otherwise = genrandInt32 -- TODO replace to 64
 
@@ -137,7 +140,8 @@ genrandInt32 seed =  map (word32ToWord . tempering) $ g 0 $ initGenrandArray32 s
 
 {- default seed is 5489-}
 
-mag01 = [0x0, matrixA] :: [Word32]
+mag01 :: [Word32]
+mag01 =  [0x0, matrixA]
 
 g       :: Word32 -> A.Array Word32 Word32 -> [Word32]
 g i arr
@@ -160,7 +164,7 @@ g i arr
                                                   return arr'
                        in A.elems narr ++ g 0 narr
   where y :: Word32
-        y =  ((arr A.! (if i < (n - 1) then i     else (n - 1))) .&. upperMask) .|.
+        y =  ((arr A.! i) .&. upperMask) .|.
              ((arr A.! (if i < (n - 1) then i + 1 else 0))       .&. lowerMask)
 
 tempering   :: Word32 -> Word32
