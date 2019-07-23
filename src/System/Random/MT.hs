@@ -63,7 +63,7 @@ instance RandomMT Double          where
 instance RandomMT Float           where
   randoms = genrandReal132
 instance RandomMT Word32          where
-  randoms gen = map tempering $ g 0 $ initGenrandArray32 $ getSeed gen
+  randoms gen = map tempering $ mt32 0 $ initGenrandArray32 $ getSeed gen
 
 class (Num a, Ord a, Integral a, RandomMT a) => RandomMTR a where
   randomRs              :: (a, a) -> StdGenMT -> [a]
@@ -155,33 +155,33 @@ initGenrandArray32   :: Seed -> A.Array Word32 Word32
 initGenrandArray32 s =  A.listArray (0, n32 - 1) (initGenrand32 s)
 
 genrandInt32      :: Seed -> [Word]
-genrandInt32 seed =  map (word32ToWord . tempering) $ g 0 $ initGenrandArray32 seed
+genrandInt32 seed =  map (word32ToWord . tempering) $ mt32 0 $ initGenrandArray32 seed
 
 {- default seed is 5489-}
 
 mag0132 :: [Word32]
 mag0132 =  [0x0, matrixA32]
 
-g       :: Word32 -> A.Array Word32 Word32 -> [Word32]
-g i arr
-  | i < (n32 - m32) = g (i + 1) $ runSTArray $ do arr' <- M.thaw arr
-                                                  writeArray arr' i $ (arr A.! (i + m32)) `xor`
-                                                                      (y `shiftR` 1) `xor`
-                                                                      (mag0132 !! fromIntegral (y .&. (0x1 :: Word32)))
-                                                  return arr'
-  | (n32 - m32) <= i &&
-    (i < n32 - 1) = g (i + 1) $ runSTArray $ do arr' <- M.thaw arr
-                                                writeArray arr' i $ (arr A.! (i + (m32 - n32))) `xor`
-                                                                    (y `shiftR` 1) `xor`
-                                                                    (mag0132 !! fromIntegral (y .&. (0x1 :: Word32)))
-                                                return arr'
+mt32       :: Word32 -> A.Array Word32 Word32 -> [Word32]
+mt32 i arr
+     | i < (n32 - m32) = mt32 (i + 1) $ runSTArray $ do arr' <- M.thaw arr
+                                                        writeArray arr' i $ (arr A.! (i + m32)) `xor`
+                                                                            (y `shiftR` 1) `xor`
+                                                                            (mag0132 !! fromIntegral (y .&. (0x1 :: Word32)))
+                                                        return arr'
+     | (n32 - m32) <= i &&
+       (i < n32 - 1) = mt32 (i + 1) $ runSTArray $ do arr' <- M.thaw arr
+                                                      writeArray arr' i $ (arr A.! (i + (m32 - n32))) `xor`
+                                                                          (y `shiftR` 1) `xor`
+                                                                          (mag0132 !! fromIntegral (y .&. (0x1 :: Word32)))
+                                                      return arr'
 
   | otherwise        = let narr = runSTArray $ do arr' <- M.thaw arr
                                                   writeArray arr' i $ (arr A.! (m32 - 1)) `xor`
                                                                       (y `shiftR` 1) `xor`
                                                                       (mag0132 !! fromIntegral (y .&. (0x1 :: Word32)))
                                                   return arr'
-                       in A.elems narr ++ g 0 narr
+                       in A.elems narr ++ mt32 0 narr
   where y :: Word32
         y =  ((arr A.! i) .&. upperMask32) .|.
              ((arr A.! (if i < (n32 - 1) then i + 1 else 0))       .&. lowerMask32)
