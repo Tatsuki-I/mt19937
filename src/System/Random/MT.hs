@@ -1,3 +1,4 @@
+{-# Language FlexibleInstances #-}
 module System.Random.MT ( randoms
                         , random
                         , randomRs
@@ -32,7 +33,8 @@ import           Data.Array.ST                    ( newArray
 
 import           System.CPUTime                   ( getCPUTime )
 import           Codec.CBOR.Magic                 ( word32ToWord )
-import           Data.Ratio                       ( (%) )
+import           Data.Ratio                       ( Ratio
+                                                  , (%) )
 import           Data.BitStream.ContinuousMapping ( wordToInt )
 
 
@@ -52,6 +54,10 @@ instance RandomMT Word   where
   randoms = genrandInt . getSeed
 instance RandomMT Int    where
   randoms gen = map wordToInt (randoms gen :: [Word])
+instance RandomMT (Ratio Integer) where
+  randoms = genrandRational132
+instance RandomMT (Ratio Int32) where
+  randoms = genrandRational132
 instance RandomMT Double where
   randoms = genrandReal132
 instance RandomMT Float  where
@@ -95,12 +101,25 @@ getSeed (StdGenMT _ s) =  s
 getNum                :: StdGenMT -> Int
 getNum (StdGenMT i _) =  i
 
-genrandReal132     :: Fractional b => System.Random.MT.StdGenMT -> [b]
+--genrandRational132     :: System.Random.MT.StdGenMT -> [Ratio Integer]
+genrandRational132 gen =  map ((% 4294967295)
+                              . fromIntegral) (randoms gen :: [Word32])
+
+{- [0, 1] -}
+genrandReal132     :: Fractional a => System.Random.MT.StdGenMT -> [a]
 genrandReal132 gen =  map (fromRational
-                          . (% (if is64bit
-                                   then 18446744073709551615
-                                   else 4294967295))
-                          . toInteger) (randoms gen :: [Word])
+                          . (% 4294967295)
+                          . toInteger) (randoms gen :: [Word32])
+
+{- [0, 1) -}
+genrandReal232     :: Fractional a => System.Random.MT.StdGenMT -> [a]
+genrandReal232 gen =  map (fromRational
+                          . (% 4294967296)
+                          . toInteger) (randoms gen :: [Word32])
+
+{- (0, 1) -}
+genrandReal332     :: Fractional a => System.Random.MT.StdGenMT -> [a]
+genrandReal332 gen =  undefined
 {-
 (maxBound :: Word32) == 4294967295
 (maxBound :: Word64) == 18446744073709551615
