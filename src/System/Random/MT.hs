@@ -1,4 +1,7 @@
 {-# Language FlexibleInstances #-}
+--{-# OPTIONS -Wall -Werror #-}
+{-# OPTIONS -Wall -O2 #-}
+
 module System.Random.MT ( randoms
                         , random
                         , randomRs
@@ -14,6 +17,7 @@ module System.Random.MT ( randoms
 import qualified Data.Array.IArray as A
 import qualified Data.Array.MArray as M
 import qualified Data.Array.Repa   as R
+import           Data.Array.Unboxed as U
 import           Data.Bits                        ( (.&.)
                                                   , (.|.)
                                                   , xor
@@ -27,10 +31,11 @@ import           Data.STRef                       ( newSTRef
                                                   , modifySTRef
                                                   , readSTRef
                                                   , writeSTRef )
-
 import           Data.Array.ST                    ( newArray
                                                   , readArray
-                                                  , writeArray, runSTArray)
+                                                  , writeArray
+                                                  , runSTArray
+                                                  , runSTUArray )
 
 import           System.CPUTime                   ( getCPUTime )
 import           Codec.CBOR.Magic                 ( word32ToWord )
@@ -135,14 +140,14 @@ genrandInt | is64bit   = genrandInt32
            | otherwise = genrandInt32 -- TODO replace to 64
 
 {- Period parameters -}
-n32         = 624
-m32         = 397
+n32         = 624        :: Word32
+m32         = 397        :: Word32
 matrixA32   = 0x9908b0df :: Word32 -- constant vector a
 upperMask32 = 0x80000000 :: Word32 -- most significant w-r bits
 lowerMask32 = 0x7fffffff :: Word32 -- least significant r bits
 
-n64         = 312
-m64         = 156
+n64         = 312                :: Word64
+m64         = 156                :: Word64
 matrixA64   = 0xB5026F5AA96619E9 :: Word64
 upperMask64 = 0xFFFFFFFF80000000 :: Word64
 lowerMask64 = 0x7FFFFFFF         :: Word64
