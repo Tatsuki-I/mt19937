@@ -26,6 +26,8 @@ dependencies:
 - random
 - cborg
 - bit-stream
+- entropy
+- bytestring
 
 library:
   source-dirs: src

@@ -8,6 +8,7 @@ module System.Random.MT ( randoms
                         , mkStdGenMT
                         , getSeed
                         , getNum
+                        , initGenrand64
                         ) where
 
 import qualified Data.Array.IArray as A
@@ -36,6 +37,7 @@ import           Codec.CBOR.Magic                 ( word32ToWord )
 import           Data.Ratio                       ( Ratio
                                                   , (%) )
 import           Data.BitStream.ContinuousMapping ( wordToInt )
+import           Data.List                        ( unfoldr )
 
 
 class RandomMT a where
@@ -45,7 +47,7 @@ class RandomMT a where
   random gen =  (randoms gen !! getNum gen, nextGen gen)
 
   randomIOs  :: IO [a]
-  randomIOs  =  (randoms . mkStdGenMT) <$> getCPUTime
+  randomIOs  =  randoms . mkStdGenMT <$> getCPUTime
 
   randomIO :: IO a
   randomIO =  head <$> randomIOs
@@ -63,7 +65,7 @@ instance RandomMT Double          where
 instance RandomMT Float           where
   randoms = genrandReal132
 instance RandomMT Word32          where
-  randoms gen = map tempering $ mt32 0 $ initGenrandArray32 $ getSeed gen
+  randoms gen = map tempering32 $ mt32 0 $ initGenrandArray32 $ getSeed gen
 
 class (Num a, Ord a, Integral a, RandomMT a) => RandomMTR a where
   randomRs              :: (a, a) -> StdGenMT -> [a]
@@ -82,13 +84,13 @@ data StdGenMT = StdGenMT Int Seed
 nextGen                :: StdGenMT -> StdGenMT
 nextGen (StdGenMT i s) =  StdGenMT (i + 1) s
 
-type Seed = Word32
+type Seed = Word
 
-class RandomGenMT g where
+class (Integral g) => RandomGenMT g where
   mkStdGenMT :: g -> StdGenMT
 
 instance RandomGenMT Word32  where
-  mkStdGenMT = StdGenMT 0
+  mkStdGenMT i = StdGenMT 0 (fromIntegral i)
 instance RandomGenMT Integer where
   mkStdGenMT i = StdGenMT 0 (fromInteger i)
 instance RandomGenMT Int     where
@@ -139,6 +141,12 @@ matrixA32   = 0x9908b0df :: Word32 -- constant vector a
 upperMask32 = 0x80000000 :: Word32 -- most significant w-r bits
 lowerMask32 = 0x7fffffff :: Word32 -- least significant r bits
 
+n64         = 312
+m64         = 156
+matrixA64   = 0xB5026F5AA96619E9 :: Word64
+upperMask64 = 0xFFFFFFFF80000000 :: Word64
+lowerMask64 = 0x7FFFFFFF         :: Word64
+
 initGenrand32   :: Seed -> [Word32]
 initGenrand32 s =  first : f first [1 .. (n32 - 1)]
                    where f                    :: Word32 -> [Word32] -> [Word32]
@@ -146,7 +154,18 @@ initGenrand32 s =  first : f first [1 .. (n32 - 1)]
                          f prev (curr : next) =  new : f new next
                                                  where new =  ((1812433253 :: Word32) * (prev `xor` (prev `shiftR` 30)) + curr) .&. (0xffffffff :: Word32)
                          first :: Word32
-                         first =  s .&. (0xffffffff :: Word32)
+                         first =  fromIntegral s .&. (0xffffffff :: Word32)
+
+initGenrand64   :: Seed -> [Word64]
+initGenrand64 s =  unfoldr (\(prev, i) ->
+                             if i < n64
+                                then Just ( prev
+                                          , ((6364136223846793005 :: Word64) *
+                                            (prev `xor`
+                                            (prev `shiftR` 62)) + i
+                                            , i + 1))
+                                else Nothing)
+                           (fromIntegral s, 0)
 
 initGenrandRepa32   :: Seed -> R.Array R.U R.DIM1 Word32
 initGenrandRepa32 s =  R.fromListUnboxed (R.Z R.:. fromIntegral n32) $ initGenrand32 s
@@ -155,45 +174,64 @@ initGenrandArray32   :: Seed -> A.Array Word32 Word32
 initGenrandArray32 s =  A.listArray (0, n32 - 1) (initGenrand32 s)
 
 genrandInt32      :: Seed -> [Word]
-genrandInt32 seed =  map (word32ToWord . tempering) $ mt32 0 $ initGenrandArray32 seed
+genrandInt32 seed =  map (word32ToWord . tempering32) $ mt32 0 $ initGenrandArray32 seed
+
+randomishIntArray :: R.Shape sh => Seed -> R.Array R.U sh Int32
+randomishIntArray =  undefined
 
 {- default seed is 5489-}
 
-mag0132 :: [Word32]
-mag0132 =  [0x0, matrixA32]
-
 mt32       :: Word32 -> A.Array Word32 Word32 -> [Word32]
-mt32 i arr
-     | i < (n32 - m32) = mt32 (i + 1) $ runSTArray $ do arr' <- M.thaw arr
-                                                        writeArray arr' i $ (arr A.! (i + m32)) `xor`
-                                                                            (y `shiftR` 1) `xor`
-                                                                            (mag0132 !! fromIntegral (y .&. (0x1 :: Word32)))
-                                                        return arr'
-     | (n32 - m32) <= i &&
-       (i < n32 - 1) = mt32 (i + 1) $ runSTArray $ do arr' <- M.thaw arr
-                                                      writeArray arr' i $ (arr A.! (i + (m32 - n32))) `xor`
-                                                                          (y `shiftR` 1) `xor`
-                                                                          (mag0132 !! fromIntegral (y .&. (0x1 :: Word32)))
-                                                      return arr'
+mt32 i arr = (if i < n32 - 1
+                 then id
+                 else (A.elems narr ++)) (mt32 nexti narr)
+             where y :: Word32
+                   y =  ((arr A.!     i) .&. upperMask32) .|.
+                        ((arr A.! nexti) .&. lowerMask32)
+                   mag01 :: [Word32]
+                   mag01 =  [0x0, matrixA32]
+                   (param, nexti) |  i < (n32 - m32) = (i + m32,         i + 1)
+                                  |  i < (n32 - 1)   = (i + (m32 - n32), i + 1)
+                                  |  otherwise       = (m32 - 1,             0)
+                   narr =  runSTArray $ do arr' <- M.thaw arr
+                                           writeArray arr' i $ (arr A.! param) `xor`
+                                                               (y `shiftR` 1)  `xor`
+                                                               (mag01 !! fromIntegral (y .&. 0x1))
+                                           return arr'
 
-  | otherwise        = let narr = runSTArray $ do arr' <- M.thaw arr
-                                                  writeArray arr' i $ (arr A.! (m32 - 1)) `xor`
-                                                                      (y `shiftR` 1) `xor`
-                                                                      (mag0132 !! fromIntegral (y .&. (0x1 :: Word32)))
-                                                  return arr'
-                       in A.elems narr ++ mt32 0 narr
-  where y :: Word32
-        y =  ((arr A.! i) .&. upperMask32) .|.
-             ((arr A.! (if i < (n32 - 1) then i + 1 else 0))       .&. lowerMask32)
+{-
+initGenrand64   :: Seed -> [Word64]
+initGenrand64 s =  unfoldr (\(prev, i) ->
+                             if i < n64
+                                then Just ( prev
+                                          , ((6364136223846793005 :: Word64) *
+                                            (prev `xor`
+                                            (prev `shiftR` 62)) + i
+                                            , i + 1))
+                                else Nothing)
+                           (s, 0)
+-}
 
-tempering   :: Word32 -> Word32
-tempering x =  runST $ do res  <- newSTRef (x :: Word32)
-                          res' <- readSTRef res
-                          modifySTRef res (xor  (res' `shiftR` 11))
-                          res' <- readSTRef res
-                          modifySTRef res (xor ((res' `shiftL`  7) .&. (0x9d2c5680 :: Word32)))
-                          res' <- readSTRef res
-                          modifySTRef res (xor ((res' `shiftL` 15) .&. (0xefc60000 :: Word32)))
-                          res' <- readSTRef res
-                          modifySTRef res (xor  (res' `shiftR` 18))
-                          readSTRef res
+tempering32   :: Word32 -> Word32
+tempering32 x =  runST $ do res  <- newSTRef (x :: Word32)
+                            res' <- readSTRef res
+                            modifySTRef res (xor  (res' `shiftR` 11))
+                            res' <- readSTRef res
+                            modifySTRef res (xor ((res' `shiftL`  7) .&. (0x9d2c5680 :: Word32)))
+                            res' <- readSTRef res
+                            modifySTRef res (xor ((res' `shiftL` 15) .&. (0xefc60000 :: Word32)))
+                            res' <- readSTRef res
+                            modifySTRef res (xor  (res' `shiftR` 18))
+                            readSTRef res
+
+tempering64   :: Word64 -> Word64
+tempering64 x =  runST $ do res  <- newSTRef (x :: Word64)
+                            res' <- readSTRef res
+                            modifySTRef res (xor ((res' `shiftR` 29) .&. (0x5555555555555555 :: Word64)))
+                            res' <- readSTRef res
+                            modifySTRef res (xor ((res' `shiftL` 17) .&. (0x71D67FFFEDA60000 :: Word64)))
+                            res' <- readSTRef res
+                            modifySTRef res (xor ((res' `shiftL` 37) .&. (0xFFF7EEE000000000 :: Word64)))
+                            res' <- readSTRef res
+                            modifySTRef res (xor  (res' `shiftR` 43))
+                            readSTRef res
