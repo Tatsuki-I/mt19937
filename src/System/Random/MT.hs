@@ -11,7 +11,6 @@ module System.Random.MT ( randoms
                         , mkStdGenMT
                         , getSeed
                         , getNum
-                        , initGenrand64
                         , getSysRandom ) where
 
 import qualified Data.Array.IArray  as A
@@ -23,19 +22,19 @@ import           Data.Bits                        ( (.&.)
                                                   , (.|.)
                                                   , xor
                                                   , shiftR
-                                                  , shiftL)
+                                                  , shiftL )
 import           Data.Word                        ( Word8
                                                   , Word32
                                                   , Word64 )
 import           Data.Int                         ( Int32 )
-import           Data.Array.ST                    ( newArray
-                                                  , readArray
-                                                  , writeArray
+import           Data.Array.ST                    ( writeArray
                                                   , runSTArray
                                                   , runSTUArray )
 
 import           System.CPUTime                   ( getCPUTime )
-import           Codec.CBOR.Magic                 ( word32ToWord )
+import           Codec.CBOR.Magic                 ( word8ToWord
+                                                  , word32ToWord
+                                                  , word64ToWord )
 import           Data.Ratio                       ( Ratio
                                                   , (%) )
 import           Data.BitStream.ContinuousMapping ( wordToInt )
@@ -137,8 +136,8 @@ is64bit :: Bool
 is64bit =  word32ToWord (maxBound :: Word32) /= (maxBound :: Word)
 
 genrandInt :: Seed -> [Word]
-genrandInt | is64bit   = genrandInt32
-           | otherwise = genrandInt32 -- TODO replace to 64
+genrandInt | is64bit   = genrandInt64
+           | otherwise = genrandInt32
 
 {- Period parameters -}
 n32         :: Word32
@@ -170,18 +169,20 @@ initGenrand32 s =  first : f first [1 .. (n32 - 1)]
                          f _    []            =  []
                          f prev (curr : next) =  new : f new next
                                                  where new =  ((1812433253 :: Word32) * (prev `xor` (prev `shiftR` 30)) + curr) .&. (0xffffffff :: Word32)
-{-                       f' = \(prev, i) -> if i < n32
-                                               then Just ( prev
-                                                         , (((1812433253 :: Word32) *
-                                                           (prev `xor`
-                                                           (prev `shiftR` 30)) + i) .&.
-                                                           (0xffffffff :: Word32), i + 1 ))
-                                               else Nothing-}
                          first :: Word32
                          first =  fromIntegral s .&. (0xffffffff :: Word32)
 
 initGenrand64   :: Seed -> [Word64]
-initGenrand64 s =  unfoldr (\(prev, i) ->
+initGenrand64 s =  first : f first [1 .. (n64 - 1)]
+                   where f                    :: Word64 -> [Word64] -> [Word64]
+                         f _    []            =  []
+                         f prev (curr : next) =  new : f new next
+                                                 where new =  (6364136223846793005 :: Word64) * (prev `xor` (prev `shiftR` 62)) + curr
+                         first :: Word64
+                         first =  fromIntegral s
+
+initGenrand64'   :: Seed -> [Word64]
+initGenrand64' s =  unfoldr (\(prev, i) ->
                              if i < n64
                                 then Just ( prev
                                           , ((6364136223846793005 :: Word64) *
@@ -196,6 +197,12 @@ initGenrandRepa32 s =  R.fromListUnboxed (R.Z R.:. fromIntegral n32) $ initGenra
 
 initGenrandArray32   :: Seed -> A.Array Word32 Word32
 initGenrandArray32 s =  A.listArray (0, n32 - 1) (initGenrand32 s)
+
+initGenrandArray64   :: Seed -> A.Array Word64 Word64
+initGenrandArray64 s =  A.listArray (0, n64 - 1) (initGenrand64 s)
+
+genrandInt64      :: Seed -> [Word]
+genrandInt64 seed =  map (word64ToWord . tempering64) $ mt64 0 $ initGenrandArray64 seed
 
 genrandInt32      :: Seed -> [Word]
 genrandInt32 seed =  map (word32ToWord . tempering32) $ mt32 0 $ initGenrandArray32 seed
@@ -223,39 +230,50 @@ mt32 i arr = (if i < n32 - 1
                                                                (mag01 !! fromIntegral (y .&. 0x1))
                                            return arr'
 
-{-
-initGenrand64   :: Seed -> [Word64]
-initGenrand64 s =  unfoldr (\(prev, i) ->
-                             if i < n64
-                                then Just ( prev
-                                          , ((6364136223846793005 :: Word64) *
-                                            (prev `xor`
-                                            (prev `shiftR` 62)) + i
-                                            , i + 1))
-                                else Nothing)
-                           (s, 0)
--}
+
+mt64       :: Word64 -> A.Array Word64 Word64 -> [Word64]
+mt64 i arr = (if i < n64 - 1
+                 then id
+                 else (A.elems narr ++)) (mt64 nexti narr)
+             where y :: Word64
+                   y =  ((arr A.!     i) .&. upperMask64) .|.
+                        ((arr A.! nexti) .&. lowerMask64)
+                   mag01 :: [Word64]
+                   mag01 =  [0x0, matrixA64]
+                   (param, nexti) |  i < (n64 - m64) = (i + m64,         i + 1)
+                                  |  i < (n64 - 1)   = (i + (m64 - n64), i + 1)
+                                  |  otherwise       = (m64 - 1,             0)
+                   narr =  runSTArray $ do arr' <- M.thaw arr
+                                           writeArray arr' i $ (arr A.! param) `xor`
+                                                               (y `shiftR` 1)  `xor`
+                                                               (mag01 !! fromIntegral (y .&. 0x1))
+                                           return arr'
 
 tempering32   :: Word32 -> Word32
-tempering32 x =  x & (\v ->  (v `shiftR` 11)                             `xor` v)
-                   & (\v -> ((v `shiftL`  7) .&. (0x9d2c5680 :: Word32)) `xor` v)
-                   & (\v -> ((v `shiftL` 15) .&. (0xefc60000 :: Word32)) `xor` v)
-                   & (\v ->  (v `shiftR` 18)                             `xor` v)
+tempering32 x =  x & (\v ->  (v `shiftR` 11) `xor` v)
+                   & (\v -> ((v `shiftL`  7) .&.
+                             (0x9d2c5680 :: Word32)) `xor` v)
+                   & (\v -> ((v `shiftL` 15) .&.
+                             (0xefc60000 :: Word32)) `xor` v)
+                   & (\v ->  (v `shiftR` 18) `xor` v)
 
 tempering64   :: Word64 -> Word64
-tempering64 x =  x & (\v -> ((v `shiftR` 29) .&. (0x5555555555555555 :: Word64)) `xor` v)
-                   & (\v -> ((v `shiftL` 17) .&. (0x71D67FFFEDA60000 :: Word64)) `xor` v)
-                   & (\v -> ((v `shiftL` 37) .&. (0xFFF7EEE000000000 :: Word64)) `xor` v)
-                   & (\v ->  (v `shiftR` 43)                                     `xor` v)
+tempering64 x =  x & (\v -> ((v `shiftR` 29) .&.
+                             (0x5555555555555555 :: Word64)) `xor` v)
+                   & (\v -> ((v `shiftL` 17) .&.
+                             (0x71D67FFFEDA60000 :: Word64)) `xor` v)
+                   & (\v -> ((v `shiftL` 37) .&.
+                             (0xFFF7EEE000000000 :: Word64)) `xor` v)
+                   & (\v ->  (v `shiftR` 43) `xor` v)
 
 bsToWord :: B.ByteString -> Word
-bsToWord =  B.foldr (flip ((. ((`shiftL` 8) . fromIntegral)) . (.|.))) 0
+bsToWord =  B.foldr (flip ((. ((`shiftL` 8) . word8ToWord)) . (.|.))) 0
 
 
 --test = ((0 :: Word) (.|.) . (`shiftL` 8) . fromIntegral) 1
 
 test2 :: Word8 -> Word -> Word
-test2 r l = ((l .|.) . (flip shiftL 8) . (fromIntegral)) r
+test2 r l = ((l .|.) . (flip shiftL 8) . (word8ToWord)) r
 
 getSysRandom :: IO Word
 getSysRandom =  do e <- getEntropy 8
