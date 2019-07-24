@@ -1,6 +1,6 @@
 {-# Language FlexibleInstances #-}
 --{-# OPTIONS -Wall -Werror #-}
-{-# OPTIONS -Wall -O2 #-}
+{-# OPTIONS -Wall -O2 -fllvm #-}
 
 module System.Random.MT ( randoms
                         , random
@@ -12,25 +12,22 @@ module System.Random.MT ( randoms
                         , getSeed
                         , getNum
                         , initGenrand64
-                        ) where
+                        , getSysRandom ) where
 
-import qualified Data.Array.IArray as A
-import qualified Data.Array.MArray as M
-import qualified Data.Array.Repa   as R
-import           Data.Array.Unboxed as U
+import qualified Data.Array.IArray  as A
+import qualified Data.Array.MArray  as M
+import qualified Data.Array.Repa    as R
+import           Data.Array.Unboxed as U  --TODO
+import qualified Data.ByteString    as B
 import           Data.Bits                        ( (.&.)
                                                   , (.|.)
                                                   , xor
                                                   , shiftR
                                                   , shiftL)
-import           Data.Word                        ( Word32
+import           Data.Word                        ( Word8
+                                                  , Word32
                                                   , Word64 )
 import           Data.Int                         ( Int32 )
-import           Control.Monad.ST                 ( runST)
-import           Data.STRef                       ( newSTRef
-                                                  , modifySTRef
-                                                  , readSTRef
-                                                  , writeSTRef )
 import           Data.Array.ST                    ( newArray
                                                   , readArray
                                                   , writeArray
@@ -43,6 +40,10 @@ import           Data.Ratio                       ( Ratio
                                                   , (%) )
 import           Data.BitStream.ContinuousMapping ( wordToInt )
 import           Data.List                        ( unfoldr )
+import           System.Entropy                   ( getEntropy
+                                                  , getHardwareEntropy )
+import           Data.Maybe                       ( fromMaybe )
+import           Data.Function                    ( (&) )
 
 
 class RandomMT a where
@@ -75,8 +76,8 @@ instance RandomMT Word32          where
 class (Num a, Ord a, Integral a, RandomMT a) => RandomMTR a where
   randomRs              :: (a, a) -> StdGenMT -> [a]
   randomRs (lo, hi) gen |  lo > hi   = randomRs (hi, lo) gen
-                        |  otherwise = map ((+ lo) . (`mod` range)) (randoms gen)
-                        where range = hi - lo + 1
+                        |  otherwise = map ((+ lo) . (`mod` r)) (randoms gen)
+                        where r = hi - lo + 1
 
   randomR       :: (a, a) -> StdGenMT -> (a, StdGenMT)
   randomR r gen =  (randomRs r gen !! getNum gen, nextGen gen)
@@ -140,24 +141,42 @@ genrandInt | is64bit   = genrandInt32
            | otherwise = genrandInt32 -- TODO replace to 64
 
 {- Period parameters -}
-n32         = 624        :: Word32
-m32         = 397        :: Word32
-matrixA32   = 0x9908b0df :: Word32 -- constant vector a
-upperMask32 = 0x80000000 :: Word32 -- most significant w-r bits
-lowerMask32 = 0x7fffffff :: Word32 -- least significant r bits
+n32         :: Word32
+n32         =  624
+m32         :: Word32
+m32         =  397
+matrixA32   :: Word32
+matrixA32   =  0x9908b0df -- constant vector a
+upperMask32 :: Word32
+upperMask32 =  0x80000000 -- most significant w-r bits
+lowerMask32 :: Word32
+lowerMask32 =  0x7fffffff -- least significant r bits
 
-n64         = 312                :: Word64
-m64         = 156                :: Word64
-matrixA64   = 0xB5026F5AA96619E9 :: Word64
-upperMask64 = 0xFFFFFFFF80000000 :: Word64
-lowerMask64 = 0x7FFFFFFF         :: Word64
+n64         :: Word64
+n64         =  312
+m64         :: Word64
+m64         =  156
+matrixA64   :: Word64
+matrixA64   =  0xB5026F5AA96619E9
+upperMask64 :: Word64
+upperMask64 =  0xFFFFFFFF80000000
+lowerMask64 :: Word64
+lowerMask64 =  0x7FFFFFFF
 
 initGenrand32   :: Seed -> [Word32]
 initGenrand32 s =  first : f first [1 .. (n32 - 1)]
+--unfoldr f' (first, 0)
                    where f                    :: Word32 -> [Word32] -> [Word32]
                          f _    []            =  []
                          f prev (curr : next) =  new : f new next
                                                  where new =  ((1812433253 :: Word32) * (prev `xor` (prev `shiftR` 30)) + curr) .&. (0xffffffff :: Word32)
+{-                       f' = \(prev, i) -> if i < n32
+                                               then Just ( prev
+                                                         , (((1812433253 :: Word32) *
+                                                           (prev `xor`
+                                                           (prev `shiftR` 30)) + i) .&.
+                                                           (0xffffffff :: Word32), i + 1 ))
+                                               else Nothing-}
                          first :: Word32
                          first =  fromIntegral s .&. (0xffffffff :: Word32)
 
@@ -184,7 +203,7 @@ genrandInt32 seed =  map (word32ToWord . tempering32) $ mt32 0 $ initGenrandArra
 randomishIntArray :: R.Shape sh => Seed -> R.Array R.U sh Int32
 randomishIntArray =  undefined
 
-{- default seed is 5489-}
+{- default seed is 5489 -}
 
 mt32       :: Word32 -> A.Array Word32 Word32 -> [Word32]
 mt32 i arr = (if i < n32 - 1
@@ -218,25 +237,26 @@ initGenrand64 s =  unfoldr (\(prev, i) ->
 -}
 
 tempering32   :: Word32 -> Word32
-tempering32 x =  runST $ do res  <- newSTRef (x :: Word32)
-                            res' <- readSTRef res
-                            modifySTRef res (xor  (res' `shiftR` 11))
-                            res' <- readSTRef res
-                            modifySTRef res (xor ((res' `shiftL`  7) .&. (0x9d2c5680 :: Word32)))
-                            res' <- readSTRef res
-                            modifySTRef res (xor ((res' `shiftL` 15) .&. (0xefc60000 :: Word32)))
-                            res' <- readSTRef res
-                            modifySTRef res (xor  (res' `shiftR` 18))
-                            readSTRef res
+tempering32 x =  x & (\v ->  (v `shiftR` 11)                             `xor` v)
+                   & (\v -> ((v `shiftL`  7) .&. (0x9d2c5680 :: Word32)) `xor` v)
+                   & (\v -> ((v `shiftL` 15) .&. (0xefc60000 :: Word32)) `xor` v)
+                   & (\v ->  (v `shiftR` 18)                             `xor` v)
 
 tempering64   :: Word64 -> Word64
-tempering64 x =  runST $ do res  <- newSTRef (x :: Word64)
-                            res' <- readSTRef res
-                            modifySTRef res (xor ((res' `shiftR` 29) .&. (0x5555555555555555 :: Word64)))
-                            res' <- readSTRef res
-                            modifySTRef res (xor ((res' `shiftL` 17) .&. (0x71D67FFFEDA60000 :: Word64)))
-                            res' <- readSTRef res
-                            modifySTRef res (xor ((res' `shiftL` 37) .&. (0xFFF7EEE000000000 :: Word64)))
-                            res' <- readSTRef res
-                            modifySTRef res (xor  (res' `shiftR` 43))
-                            readSTRef res
+tempering64 x =  x & (\v -> ((v `shiftR` 29) .&. (0x5555555555555555 :: Word64)) `xor` v)
+                   & (\v -> ((v `shiftL` 17) .&. (0x71D67FFFEDA60000 :: Word64)) `xor` v)
+                   & (\v -> ((v `shiftL` 37) .&. (0xFFF7EEE000000000 :: Word64)) `xor` v)
+                   & (\v ->  (v `shiftR` 43)                                     `xor` v)
+
+bsToWord :: B.ByteString -> Word
+bsToWord =  B.foldr (flip ((. ((`shiftL` 8) . fromIntegral)) . (.|.))) 0
+
+
+--test = ((0 :: Word) (.|.) . (`shiftL` 8) . fromIntegral) 1
+
+test2 :: Word8 -> Word -> Word
+test2 r l = ((l .|.) . (flip shiftL 8) . (fromIntegral)) r
+
+getSysRandom :: IO Word
+getSysRandom =  do e <- getEntropy 8
+                   ((bsToWord . fromMaybe e) <$> getHardwareEntropy 8)
