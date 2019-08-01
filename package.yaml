@@ -28,6 +28,10 @@ dependencies:
 - bit-stream
 - entropy
 - bytestring
+- primitive
+- vector
+- repa-algorithms
+- parallel
 
 library:
   source-dirs: src
